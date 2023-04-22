@@ -13,7 +13,7 @@ def all_reduce(x):
     torch.distributed.all_reduce(x)
     torch.cuda.synchronize()
 
-if "TORCH_DIST_BACKEND" in os.environ:
+if "TORCH_DISTRIBUTED_BACKEND" in os.environ:
     backend = os.environ["TORCH_DISTRIBUTED_BACKEND"]
 else:
     backend = "gloo" if torch.cuda.nccl.version() is None or torch.cuda.device_count() == 0 else "nccl"
