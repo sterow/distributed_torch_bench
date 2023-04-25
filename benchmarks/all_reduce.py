@@ -27,8 +27,8 @@ torch.distributed.init_process_group(backend=backend, init_method="env://")
 
 assert torch.distributed.is_initialized()
 print(f"torch.distributed initialized, backend: \"{backend}\", " +
-      "size {torch.distributed.get_world_size()}, " +
-      "rank {torch.distributed.get_rank()}")
+      f"size {torch.distributed.get_world_size()}, " +
+      f"rank {torch.distributed.get_rank()}")
 
 is_master = torch.distributed.get_rank() == 0
 
@@ -43,7 +43,7 @@ inner_loop = 10
 print("Generating test message, size: {:.0f} MB, test will loop {} * {} times"
       .format(n / 1024 / 1024, outer_loop, inner_loop))
 
-x = torch.randn(n).cuda(local_rank)
+x = torch.zeros(n).cuda(local_rank)
 
 warming_up = True
 if is_master:
