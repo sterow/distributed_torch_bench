@@ -2,12 +2,94 @@ import argparse
 import os
 import time
 import torch
+from abc import abstractmethod
 from datetime import datetime
 
 
-def all_reduce(x):
-    torch.distributed.all_reduce(x)
-    torch.cuda.synchronize()
+class CollectiveOp:
+    @abstractmethod
+    def prepare(self):
+        pass
+
+    @abstractmethod
+    def run(self):
+        pass
+
+    def __init__(self, tensor_size, world_size):
+        self.tensor_size = tensor_size
+        self.world_size = world_size
+
+
+class Reduce(CollectiveOp):
+    def prepare():
+        pass  # TODO
+
+    def run(x):
+        torch.distributed.reduce(x, dst=0)
+
+
+class AllReduce(CollectiveOp):
+    def prepare():
+        pass  # TODO
+
+    def run(x):
+        torch.distributed.all_reduce(x)
+
+
+class Gather(CollectiveOp):
+    def prepare():
+        pass  # TODO
+
+    def run(x, x_list):
+        torch.distributed.gather(x, gather_list=x_list)
+
+
+class AllGather(CollectiveOp):
+    def prepare():
+        pass  # TODO
+
+    def run(x, x_list):
+        torch.distributed.all_gather(x_list, x)
+
+
+class Scatter(CollectiveOp):
+    def prepare():
+        pass  # TODO
+
+    def run(x, x_list):
+        torch.distributed.scatter(x, scatter_list=x_list)
+
+
+class ReduceScatter(CollectiveOp):
+    def prepare():
+        pass  # TODO
+
+    def run(x, x_list):
+        torch.distributed.reduce_scatter(x, input_list=x_list)
+
+
+class AllToAll(CollectiveOp):
+    def prepare():
+        pass  # TODO
+
+    def run(out_list, in_list):
+        torch.distributed.all_to_all(out_list, in_list)
+
+
+class Broadcast(CollectiveOp):
+    def prepare():
+        pass  # TODO
+
+    def run(x):
+        torch.distributed.broadcast(x, src=0)
+
+
+class Barrier(CollectiveOp):
+    def prepare():
+        pass  # TODO
+
+    def run():
+        torch.distributed.barrier()
 
 
 is_master = None
@@ -61,9 +143,13 @@ def run_collective_loop(collective,
 
     for _ in range(loop + 1):
         t_begin = time.time()
+
         for _ in range(inner_loop):
-            collective(x)
+            collective.run()
+            torch.cuda.synchronize()
+
         t_end = time.time()
+
         if is_master:
             str_date_time = datetime.fromtimestamp(t_end) \
                 .strftime("%m-%d %H:%M:%S")
@@ -103,4 +189,30 @@ parser.add_argument("-n", "--loop",
 args = parser.parse_args()
 
 init_torch_distributed()
-run_collective_loop(all_reduce, tensor_size=args.size, loop=args.loop)
+
+match args.collective:
+    case "send":
+        pass
+    case "recv":
+        pass
+    case "broadcast":
+        op = Broadcast(args.size, torch.distributed.get_world_size())
+    case "all_reduce":
+        op = AllReduce(args.size, torch.distributed.get_world_size())
+    case "reduce":
+        op = Reduce(args.size, torch.distributed.get_world_size())
+    case "all_gather":
+        op = AllGather(args.size, torch.distributed.get_world_size())
+    case "gather":
+        op = Gather(args.size, torch.distributed.get_world_size())
+    case "scatter":
+        op = Scatter(args.size, torch.distributed.get_world_size())
+    case "reduce_scatter":
+        op = ReduceScatter(args.size, torch.distributed.get_world_size())
+    case "all_to_all":
+        op = AllToAll(args.size, torch.distributed.get_world_size())
+    case "barrier":
+        op = Barrier(args.size, torch.distributed.get_world_size())
+
+op.prepare()
+run_collective_loop(op, tensor_size=args.size, loop=args.loop)
