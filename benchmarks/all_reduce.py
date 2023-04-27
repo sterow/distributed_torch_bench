@@ -21,55 +21,57 @@ class CollectiveOp:
 
 
 class Reduce(CollectiveOp):
-    def prepare():
+    def prepare(self):
         pass  # TODO
 
-    def run(x):
+    def run(self):
         torch.distributed.reduce(x, dst=0)
 
 
 class AllReduce(CollectiveOp):
-    def prepare():
-        pass  # TODO
+    def prepare(self):
+        print("Generating all_reduce message, size: {:.0f} MB"
+              .format(self.tensor_size / 1024 / 1024))
+        self.x = torch.zeros(self.tensor_size).cuda(local_rank)
 
-    def run(x):
+    def run(self):
         torch.distributed.all_reduce(x)
 
 
 class Gather(CollectiveOp):
-    def prepare():
+    def prepare(self):
         pass  # TODO
 
-    def run(x, x_list):
+    def run(self, x_list):
         torch.distributed.gather(x, gather_list=x_list)
 
 
 class AllGather(CollectiveOp):
-    def prepare():
+    def prepare(self):
         pass  # TODO
 
-    def run(x, x_list):
+    def run(self, x_list):
         torch.distributed.all_gather(x_list, x)
 
 
 class Scatter(CollectiveOp):
-    def prepare():
+    def prepare(self):
         pass  # TODO
 
-    def run(x, x_list):
+    def run(self, x_list):
         torch.distributed.scatter(x, scatter_list=x_list)
 
 
 class ReduceScatter(CollectiveOp):
-    def prepare():
+    def prepare(self):
         pass  # TODO
 
-    def run(x, x_list):
+    def run(self, x_list):
         torch.distributed.reduce_scatter(x, input_list=x_list)
 
 
 class AllToAll(CollectiveOp):
-    def prepare():
+    def prepare(self):
         pass  # TODO
 
     def run(out_list, in_list):
@@ -77,15 +79,15 @@ class AllToAll(CollectiveOp):
 
 
 class Broadcast(CollectiveOp):
-    def prepare():
+    def prepare(self):
         pass  # TODO
 
-    def run(x):
+    def run(self):
         torch.distributed.broadcast(x, src=0)
 
 
 class Barrier(CollectiveOp):
-    def prepare():
+    def prepare(self):
         pass  # TODO
 
     def run():
@@ -131,11 +133,8 @@ def run_collective_loop(collective,
                         tensor_size=1024 * 1024 * 1024,
                         loop=1000,
                         inner_loop=10):
-    print("Generating test message, size: {:.0f} MB, {} will loop {} * {} times"
-          .format(tensor_size / 1024 / 1024,
-                  collective.__name__, loop, inner_loop))
-
-    x = torch.zeros(tensor_size).cuda(local_rank)
+    print("{} will loop {} * {} times"
+          .format(collective.__name__, loop, inner_loop))
 
     warming_up = True
     if is_master:
