@@ -19,13 +19,13 @@ class CollectiveOp:
 
     def prepare_one_tensor(self, op_name):
         logging.info("Generating {} message, size: {:.0f} MB"
-                     .format(op_name, self.tensor_size / 1024 / 1024))
+                     .format(op_name, self.tensor_size * 4 / 1024 / 1024))
         return torch.zeros(self.tensor_size).cuda(self.local_rank)
 
     def prepare_list_of_tensors(self, op_name):
-        logging.info("Generating {} {} messages, size: {:.0f} MB"
+        logging.info("Generating {} {} messages, size: {:.0f} MB each"
                      .format(self.world_size, op_name,
-                             self.tensor_size / 1024 / 1024))
+                             self.tensor_size * 4 / 1024 / 1024))
 
         x_list = []
         for _ in range(self.world_size):
@@ -42,6 +42,20 @@ class CollectiveOp:
         self.x = CollectiveOp.prepare_one_tensor(self, op_name)
         if one_and_all and self.rank == 0:
             self.x_list = CollectiveOp.prepare_list_of_tensors(self, op_name + "_list")
+
+
+class SendRecv(CollectiveOp):
+    def prepare(self):
+        self.data_size /= 2
+        print("Generating send and recv tensor, size: {:.0f} GB"
+              .format(self.data_size / 1024 / 1024 / 1024))
+        self.x = torch.zeros(self.data_size / 4).cuda(local_rank)
+        self.y = torch.zeros(self.data_size / 4).cuda(local_rank)
+
+    def run(self, target_rank=0):
+        recv_req = torch.distributed.irecv(self.y)
+        torch.distributed.send(self.x, dst=target_rank)
+        recv_req.wait()
 
 
 class Reduce(CollectiveOp):
@@ -121,20 +135,21 @@ class Barrier(CollectiveOp):
     def prepare(self, tensor_size, local_rank):
         pass
 
-    def run():
+    def run(self, target_rank=0):
         torch.distributed.barrier()
 
 
 class SendReceive(CollectiveOp):
     def prepare(self, tensor_size, local_rank):
         CollectiveOp.prepare(tensor_size, local_rank)
-        self.output = CollectiveOp.prepare_one_tensor(self, "recv")
-        self.input = CollectiveOp.prepare_one_tensor(self, "send")
+        self.recv = CollectiveOp.prepare_one_tensor(self, "recv")
+        self.send = CollectiveOp.prepare_one_tensor(self, "send")
 
     def run(self, target_rank):
-        r = torch.distributed.irecv(self.output)
-        torch.distributed.send(self.input, target_rank)
+        r = torch.distributed.irecv(self.recv)
+        torch.distributed.send(self.send, target_rank)
         r.wait()
+
 
 is_master = None
 local_rank = None
@@ -147,6 +162,7 @@ def print_nccl_env_vars():
 
 
 def init_torch_distributed():
+    global world_size
     global is_master
     global local_rank
 
@@ -164,8 +180,8 @@ def init_torch_distributed():
                  f"size {torch.distributed.get_world_size()}, " +
                  f"rank {torch.distributed.get_rank()}")
 
+    world_size = torch.distributed.get_world_size()
     is_master = torch.distributed.get_rank() == 0
-
     local_rank = int(os.environ["LOCAL_RANK"])
     if local_rank == 0:
         print_nccl_env_vars()
@@ -180,6 +196,7 @@ def run_collective_loop(collective, tensor_size, loop=1000, inner_loop=10):
         logging.info("Warming up ...")
 
     for _ in range(loop + 1):
+
         t_begin = time.time()
 
         for _ in range(inner_loop):
@@ -238,7 +255,7 @@ parser.add_argument("-c", "--collective",
                     type=str)
 parser.add_argument("-s", "--size",
                     dest="size",
-                    default=16 * 1024 * 1024 * 1024,
+                    default=64 * 1024 * 1024 * 1024,
                     help="Tensor size",
                     type=int)
 parser.add_argument("-n", "--loop",
