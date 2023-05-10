@@ -266,10 +266,12 @@ def run_collective_loop(collective, tensor_bytes, loop=1000, inner_loop=10):
 
 
 def run_p2p_loop(send_recv, tensor_bytes, stride=1, loop=1000, inner_loop=10, lag_limit=0.5):
-
+    #  Force NCCL only using network to transfer data
+    os.environ['NCCL_SHM_DISABLE'] = '1'
+    os.environ['NCCL_P2P_LEVEL'] = 'LOC'
     for _ in range(loop + 1):
         times = []
-        for delta in range(1, world_size, stride):
+        for delta in range(stride, world_size, stride):
             recv_from = (myrank - delta) % world_size
             send_to = (myrank + delta) % world_size
 
@@ -303,7 +305,7 @@ def run_p2p_loop(send_recv, tensor_bytes, stride=1, loop=1000, inner_loop=10, la
                                  to_readable_number(tensor_bytes * inner_loop / median_time)))
 
             if stragglers_pos == n:
-                logging.info("No stragglers found within {:.0%} lag limitations".format(lag_limit))
+                logging.info("No stragglers found, lag limit is {:.0%}".format(lag_limit))
             else:
                 logging.warning("{:.1%} ({}/{}) as stragglers found, lag limit is {:.0%}".format(
                              (n-stragglers_pos)/n, n-stragglers_pos, n, lag_limit))
