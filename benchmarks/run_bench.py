@@ -52,10 +52,10 @@ class CollectiveOp(ABC):
     def run(self):
         pass
 
-    def prepare(self, tensor_bytes, local_rank):
+    def set_data(self, tensor_bytes, world_size, rank, local_rank):
         self.tensor_bytes = tensor_bytes
-        self.world_size = torch.distributed.get_world_size()
-        self.rank = torch.distributed.get_rank()
+        self.world_size = world_size
+        self.rank = rank
         self.local_rank = local_rank
 
     def prepare_one_tensor(self, tensor_name=None):
@@ -96,9 +96,8 @@ class CollectiveOp(ABC):
 
 
 class Reduce(CollectiveOp):
-    def prepare(self, tensor_bytes, local_rank):
+    def prepare(self):
         self.display_name = "reduce"
-        super().prepare(tensor_bytes, local_rank)
         super().prepare_tensors()
 
     def run(self):
@@ -106,9 +105,8 @@ class Reduce(CollectiveOp):
 
 
 class AllReduce(CollectiveOp):
-    def prepare(self, tensor_bytes, local_rank):
+    def prepare(self):
         self.display_name = "all_reduce"
-        super().prepare(tensor_bytes, local_rank)
         super().prepare_tensors()
 
     def run(self):
@@ -116,9 +114,8 @@ class AllReduce(CollectiveOp):
 
 
 class Gather(CollectiveOp):
-    def prepare(self, tensor_bytes, local_rank):
+    def prepare(self):
         self.display_name = "gather"
-        super().prepare(tensor_bytes, local_rank)
         super().prepare_tensors(gather_or_scatter=True)
 
     def run(self):
@@ -126,9 +123,8 @@ class Gather(CollectiveOp):
 
 
 class AllGather(CollectiveOp):
-    def prepare(self, tensor_bytes, local_rank):
+    def prepare(self):
         self.display_name = "all_gather"
-        super().prepare(tensor_bytes, local_rank)
         super().prepare_tensors(gather_or_scatter=True, with_all=True)
 
     def run(self):
@@ -136,9 +132,8 @@ class AllGather(CollectiveOp):
 
 
 class Scatter(CollectiveOp):
-    def prepare(self, tensor_bytes, local_rank):
+    def prepare(self):
         self.display_name = "scatter"
-        super().prepare(tensor_bytes, local_rank)
         super().prepare_tensors(gather_or_scatter=True)
 
     def run(self):
@@ -146,9 +141,8 @@ class Scatter(CollectiveOp):
 
 
 class ReduceScatter(CollectiveOp):
-    def prepare(self, tensor_bytes, local_rank):
+    def prepare(self):
         self.display_name = "reduce_scatter"
-        super().prepare(tensor_bytes, local_rank)
         super().prepare_tensors(gather_or_scatter=True, with_all=True)
 
     def run(self):
@@ -156,9 +150,8 @@ class ReduceScatter(CollectiveOp):
 
 
 class Broadcast(CollectiveOp):
-    def prepare(self, tensor_bytes, local_rank):
+    def prepare(self):
         self.display_name = "broadcast"
-        super().prepare(tensor_bytes, local_rank)
         super().prepare_tensors()
 
     def run(self):
@@ -166,9 +159,8 @@ class Broadcast(CollectiveOp):
 
 
 class AllToAll(CollectiveOp):
-    def prepare(self, tensor_bytes, local_rank):
+    def prepare(self):
         self.display_name = "all_to_all_single"
-        super().prepare(tensor_bytes, local_rank)
         self.output = super().prepare_one_tensor("all_to_all_single[output]")
         self.input = super().prepare_one_tensor("all_to_all_single[input]")
 
@@ -185,18 +177,21 @@ class Barrier(CollectiveOp):
 
 
 class SendReceive(CollectiveOp):
-    def prepare(self, tensor_bytes, local_rank):
+    def prepare(self):
         self.display_name = "send_recv"
-        super().prepare(tensor_bytes, local_rank)
-        self.recv = CollectiveOp.prepare_one_tensor(self, "recv")
-        self.send = CollectiveOp.prepare_one_tensor(self, "send")
+        self.recv_tensor = super().prepare_one_tensor("recv")
+        self.send_tensor = super().prepare_one_tensor("send")
 
-    def run(self, target_rank):
-        r = torch.distributed.irecv(self.recv)
-        torch.distributed.send(self.send, target_rank)
-        r.wait()
+    def run(self, recv_from, send_to):
+        send_op = torch.distributed.P2POp(torch.distributed.isend, self.send_tensor, send_to)
+        recv_op = torch.distributed.P2POp(torch.distributed.irecv, self.recv_tensor, recv_from)
+        reqs = torch.distributed.batch_isend_irecv([send_op, recv_op])
+        for req in reqs:
+            req.wait()
 
 
+myrank = None
+world_size = None
 is_master = None
 local_rank = None
 
@@ -208,6 +203,7 @@ def print_nccl_env_vars():
 
 
 def init_torch_distributed():
+    global myrank
     global world_size
     global is_master
     global local_rank
@@ -222,15 +218,20 @@ def init_torch_distributed():
     torch.distributed.init_process_group(backend=backend, init_method="env://")
 
     assert torch.distributed.is_initialized()
-    logging.info(f"torch.distributed initialized, backend: \"{backend}\", " +
-                 f"size {torch.distributed.get_world_size()}, " +
-                 f"rank {torch.distributed.get_rank()}")
-
+    myrank = torch.distributed.get_rank()
     world_size = torch.distributed.get_world_size()
-    is_master = torch.distributed.get_rank() == 0
+    is_master = myrank == 0
     local_rank = int(os.environ.get("LOCAL_RANK", default="0"))
+
     if local_rank == 0:
         print_nccl_env_vars()
+
+    logging.info(f"torch.distributed initialized, backend: \"{backend}\", " +
+                 f"size {world_size}, " +
+                 f"rank {myrank}")
+
+    # NOTICE: without this line, the P2P send and receive will hangs with NCCL backend!
+    torch.cuda.set_device(local_rank)
 
 
 def run_collective_loop(collective, tensor_bytes, loop=1000, inner_loop=10):
@@ -264,52 +265,59 @@ def run_collective_loop(collective, tensor_bytes, loop=1000, inner_loop=10):
         logging.info("Testing has ended.")
 
 
-def run_p2p_loop(send_recv, tensor_bytes, stride=1, loop=1000, inner_loop=10, lag_limitation=0.5):
-    myrank = torch.distributed.get_rank()
-    world_size = torch.distributed.get_world_size()
+def run_p2p_loop(send_recv, tensor_bytes, stride=1, loop=1000, inner_loop=10, lag_limit=0.5):
 
     for _ in range(loop + 1):
         times = []
         for delta in range(1, world_size, stride):
-            target_rank = (myrank + delta) % world_size
+            recv_from = (myrank - delta) % world_size
+            send_to = (myrank + delta) % world_size
+
             t = time.time()
             for _ in range(inner_loop):
-                send_recv.run(target_rank)
-                torch.cuda.synchronize()
+                send_recv.run(recv_from, send_to)
+                if torch.cuda.device_count() > 0:
+                    torch.cuda.synchronize()
             t = time.time() - t
-            times += (t, myrank, target_rank)
+            times.append((t, myrank, recv_from, send_to))
+
         if myrank > 0:
             torch.distributed.gather_object(times)
         else:
-            # I'm master, gather all times from all ranks
-            n = (len(times) * world_size)
-            all_times = [(0.0, 0, 0)] * n
+            # I'm the master, gather all times from all ranks
+            all_times = [None] * world_size
             torch.distributed.gather_object(times, all_times)
+            all_times = [time for times in all_times for time in times]
             # Find straggers 30% larger than 50 percentile median
-            all_times.sort(all_times, key=lambda x: x[0])
-            median_pos = int(n * 0.5)
-            median = all_times[median_pos]
-            upper_bound = median[0] * (1 + lag_limitation)
+            all_times.sort(key=lambda x: x[0])
+            n = (world_size - 1) * world_size
+            middle_pos = int(n * 0.5)
+            median_time = all_times[middle_pos][0]
+            upper_bound = median_time * (1 + lag_limit)
             stragglers_pos = bisect.bisect_left(all_times, upper_bound,
-                                                lo=median_pos, key=lambda x: x[0])
+                                                lo=middle_pos, key=lambda x: x[0])
 
-            logging.info("P2P test: median latency is {}s, median bandwidth is {}B/s".format(
-                         median, to_readable_number(tensor_bytes * inner_loop / median)))
+            logging.info("")
+            logging.info("P2P test: median tranfer time is {:.4f}s, median transfer bandwidth is {}B/s"
+                         .format(median_time,
+                                 to_readable_number(tensor_bytes * inner_loop / median_time)))
 
             if stragglers_pos == n:
-                logging.info("No stragglers found within 50%% lag limitations")
+                logging.info("No stragglers found within {:.0%} lag limitations".format(lag_limit))
             else:
-                logging.warn("{:%} ({}/{}) as stragglers found within {:%} lag limitation".format(
-                             (n-stragglers_pos)/n, n-stragglers_pos, n, lag_limitation))
+                logging.warning("{:.1%} ({}/{}) as stragglers found, lag limit is {:.0%}".format(
+                             (n-stragglers_pos)/n, n-stragglers_pos, n, lag_limit))
                 print_count = min(n-stragglers_pos, 10)
-                logging.info(f"The largest {print_count} stragglers are:")
-                logging.info("Stragger latency    From     To")
+                logging.info(f"The largest {print_count} straggler(s) are:")
+                logging.info("Transfer Time                    Path")
                 for i in range(n - print_count, n):
-                    s = all_times[i]
-                    logging.info("{:.0f >16}    {: >8}    {: >8}".format(s[i][0], s[i][1], s[i][2]))
+                    t = all_times[i]
+                    logging.info("{:>8.4f} ({:>+8.4f}) ({:>+2.0%})    {}->{}->{}".format(t[0],
+                                 t[0] - median_time, (t[0] - median_time) / median_time,
+                                 t[2], t[1], t[3]))
 
 
-logging.basicConfig(format='%(asctime)s - %(message)s', datefmt='%m-%d %H:%M:%S',
+logging.basicConfig(format=f'%(asctime)s - %(message)s', datefmt='%m-%d %H:%M:%S',
                     stream=sys.stdout, level=logging.DEBUG)
 
 parser = argparse.ArgumentParser()
@@ -363,9 +371,10 @@ match args.collective:
     case "barrier":
         op = Barrier()
 
-op.prepare(args.tensor_bytes, local_rank)
+op.set_data(args.tensor_bytes, world_size, myrank, local_rank)
+op.prepare()
 
-if args.collective == "send_receive":
+if args.collective == "send_recv":
     run_p2p_loop(op, tensor_bytes=args.tensor_bytes, stride=args.stride, loop=args.loop)
 else:
     run_collective_loop(op, tensor_bytes=args.tensor_bytes, loop=args.loop)
