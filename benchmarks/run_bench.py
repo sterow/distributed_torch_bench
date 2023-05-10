@@ -204,7 +204,7 @@ local_rank = None
 def print_nccl_env_vars():
     for k in os.environ:
         if k.startswith("NCCL"):
-            logging.info(k, "=", os.environ[k])
+            logging.info("%s=%s", k, os.environ[k])
 
 
 def init_torch_distributed():
